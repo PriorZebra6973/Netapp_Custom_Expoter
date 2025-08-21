@@ -1,0 +1,359 @@
+1. Download Required Packages (on an Internet-enabled System)
+
+Since you are working in a dark site:
+
+Download offline packages (DEB or RPM depending on OS).
+
+Required components:
+
+InfluxDB
+
+Telegraf
+
+Grafana
+
+(Optional) Prometheus, if you plan to use it as a middle layer.
+
+Example (Ubuntu/Debian):
+wget https://dl.influxdata.com/influxdb/releases/influxdb2-2.x.x-amd64.deb
+wget https://dl.influxdata.com/telegraf/releases/telegraf-1.x.x-amd64.deb
+wget https://dl.grafana.com/oss/release/grafana-9.x.x_amd64.deb
+
+
+For RHEL/CentOS:
+
+wget https://dl.influxdata.com/influxdb/releases/influxdb2-2.x.x.x86_64.rpm
+wget https://dl.influxdata.com/telegraf/releases/telegraf-1.x.x.x86_64.rpm
+wget https://dl.grafana.com/oss/release/grafana-9.x.x-1.x86_64.rpm
+
+
+Transfer these packages to your offline environment using a USB or secure transfer method.
+
+2. Install InfluxDB and Telegraf (Offline)
+On the offline server:
+
+For Debian/Ubuntu:
+
+sudo dpkg -i influxdb2-2.x.x-amd64.deb
+sudo dpkg -i telegraf-1.x.x-amd64.deb
+
+
+For RHEL/CentOS:
+
+sudo rpm -ivh influxdb2-2.x.x.x86_64.rpm
+sudo rpm -ivh telegraf-1.x.x.x86_64.rpm
+
+
+Start services:
+
+sudo systemctl enable influxdb --now
+sudo systemctl enable telegraf --now
+
+3. Configure InfluxDB
+
+Access InfluxDB:
+
+influx setup
+
+
+Create an admin user, organization, and bucket (e.g., netapp_metrics).
+
+Generate an API Token for Telegraf:
+
+influx auth create --read-buckets --write-buckets --description "Telegraf Token"
+
+4. Configure Telegraf for NetApp ONTAP
+
+Telegraf has a Prometheus input plugin that can scrape metrics from NetApp ONTAP's REST or Prometheus exporter.
+
+Method 1: Using NetApp ONTAP REST API
+
+(ONTAP ≥ 9.6 supports REST)
+
+Create /etc/telegraf/telegraf.conf with:
+
+[[inputs.http]]
+  urls = ["https://<ONTAP_CLUSTER_IP>/api/metrics"]
+  method = "GET"
+  username = "admin"
+  password = "netapp123"
+  data_format = "prometheus"
+  insecure_skip_verify = true
+
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "YOUR_TELEGRAF_TOKEN"
+  organization = "your_org"
+  bucket = "netapp_metrics"
+
+Method 2: Using NetApp Prometheus Exporter (Recommended)
+
+Deploy NetApp ONTAP Prometheus Exporter
+ (Harvest or Trident Exporter) in your environment.
+
+Update Telegraf config to scrape from Prometheus endpoint:
+
+[[inputs.prometheus]]
+  urls = ["http://<prometheus_exporter_ip>:9417/metrics"]
+
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "YOUR_TELEGRAF_TOKEN"
+  organization = "your_org"
+  bucket = "netapp_metrics"
+
+
+Restart Telegraf:
+
+sudo systemctl restart telegraf
+
+5. Install and Configure Grafana
+
+Install the Grafana package as before (dpkg -i or rpm -ivh).
+
+Start and enable Grafana:
+
+sudo systemctl enable grafana-server --now
+
+
+Login via http://<server_ip>:3000
+(Default credentials: admin/admin → set a new password)
+
+6. Connect Grafana to InfluxDB
+
+In Grafana:
+
+Go to Configuration → Data Sources → Add Data Source.
+
+Select InfluxDB.
+
+URL: http://localhost:8086
+
+Auth: Token (use the one generated above)
+
+Organization: your_org
+
+Bucket: netapp_metrics
+
+Click Save & Test.
+
+7. Create NetApp ONTAP Dashboard
+
+Import a ready-made dashboard from Grafana Labs (e.g., NetApp ONTAP Monitoring via Telegraf/InfluxDB).
+
+Or create a custom one:
+
+Add Panels → Query from netapp_metrics bucket.
+
+Metrics examples:
+
+Volume space usage
+
+Aggregate capacity
+
+SVM IOPS
+
+Latency per node
+
+8. Optional: Integrate Prometheus with InfluxDB (if you want both)
+
+If you're already running Prometheus, you can use Telegraf as a bridge to push Prometheus data into InfluxDB:
+
+[[inputs.prometheus]]
+  urls = ["http://prometheus:9090/metrics"]
+
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "YOUR_TOKEN"
+  organization = "your_org"
+  bucket = "netapp_metrics"
+
+Key Notes for Offline Setup
+
+All .deb/.rpm packages must be transferred manually.
+
+For Python-based exporters (like NetApp Harvest), you need to also download dependencies (pip download -r requirements.txt).
+
+Ensure your NetApp ONTAP APIs (/api/metrics) or exporter ports (9417) are accessible.
+
+
+
+# Telegraf Configuration
+Telegraf Configuration for NetApp ONTAP (REST + Prometheus Hybrid)
+
+Save this as:
+/etc/telegraf/telegraf.d/netapp_ontap.conf
+
+# ============================================
+# Telegraf Configuration for NetApp ONTAP
+# REST API + Prometheus Exporter (Hybrid)
+# ============================================
+
+[global_tags]
+  environment = "production"
+  source = "netapp_ontap"
+
+# --- Input: NetApp ONTAP REST API (ONTAP ≥ 9.6) ---
+[[inputs.http]]
+  name_override = "netapp_rest"
+  urls = [
+    "https://10.10.10.100/api/cluster/metrics",
+    "https://10.10.10.101/api/cluster/metrics",
+    "https://10.10.10.102/api/cluster/metrics",
+    "https://10.10.10.103/api/cluster/metrics",
+    "https://10.10.10.104/api/cluster/metrics"
+  ]
+  method = "GET"
+  username = "admin"
+  password = "netapp123"
+  data_format = "prometheus"
+  insecure_skip_verify = true
+  timeout = "10s"
+
+# --- Input: NetApp Prometheus Exporter (Harvest/Trident) ---
+[[inputs.prometheus]]
+  name_override = "netapp_prometheus"
+  urls = [
+    "http://10.10.10.200:9417/metrics", # Example Harvest Exporter
+    "http://10.10.10.201:9417/metrics"  # Additional exporters if any
+  ]
+  response_timeout = "10s"
+  metric_version = 2
+
+# --- Output: InfluxDB 2.x ---
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "YOUR_TELEGRAF_TOKEN"
+  organization = "your_org"
+  bucket = "netapp_metrics"
+
+# --- Optional: Local logging for troubleshooting ---
+[[outputs.file]]
+  files = ["stdout", "/var/log/telegraf/netapp_metrics.log"]
+  data_format = "influx"
+
+How This Works
+
+Telegraf scrapes:
+
+Directly from NetApp ONTAP REST API (/api/cluster/metrics)
+
+From any deployed Prometheus exporters (Harvest, Trident, etc.)
+
+Outputs to InfluxDB 2.x bucket (netapp_metrics).
+
+Optional file logging lets you verify incoming data before it reaches InfluxDB.
+
+Steps to Deploy
+
+Place the config file:
+
+sudo mkdir -p /etc/telegraf/telegraf.d/
+sudo nano /etc/telegraf/telegraf.d/netapp_ontap.conf
+
+
+Paste the configuration and save.
+
+Test the configuration:
+
+sudo telegraf --config /etc/telegraf/telegraf.d/netapp_ontap.conf --test
+
+
+Restart Telegraf:
+
+sudo systemctl restart telegraf
+
+Next Steps
+
+# config the telegraf with grafana
+1. Add the netapp_metrics Bucket as a Data Source in Grafana
+
+Login to Grafana:
+
+URL: http://<grafana_server>:3000
+
+Default login: admin / admin → set a new password.
+
+Add a Data Source:
+
+Go to Configuration → Data Sources → Add Data Source.
+
+Choose InfluxDB.
+
+Configure the Data Source:
+
+URL: http://<influxdb_server>:8086
+
+Organization: The one you created during influx setup.
+
+Bucket: netapp_metrics
+
+Authentication: Token (paste the Telegraf token you generated earlier).
+
+Click Save & Test — it should confirm connection success.
+
+2. Create or Import a NetApp ONTAP Dashboard
+Option A: Import a Ready-Made Dashboard
+
+Go to Dashboards → + Import.
+
+Enter a Grafana dashboard ID or JSON file.
+
+Example: Grafana Labs may have dashboards like NetApp ONTAP Monitoring (InfluxDB).
+
+Or upload a custom JSON file if provided.
+
+Option B: Create Your Own Dashboard
+
+Go to Dashboards → + New Dashboard → Add a Panel.
+
+Select the InfluxDB data source (netapp_metrics).
+
+Use Flux query (InfluxDB 2.x) to visualize metrics, e.g.:
+
+from(bucket: "netapp_metrics")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "netapp_rest" and r._field == "volume_used_percent")
+  |> mean()
+
+
+Add panels for:
+
+Volume space utilization
+
+Aggregate capacity
+
+Node IOPS
+
+SVM latency
+
+Save the dashboard with a name like NetApp ONTAP Overview.
+
+3. Fine-Tune Metrics Collection
+
+Review your Telegraf inputs:
+
+Comment out clusters or exporters you don’t need.
+
+Adjust scrape intervals (interval = "60s") to reduce load.
+
+Filter specific metrics in Telegraf:
+
+[inputs.http.tags]
+  include = ["volume_used_percent","node_latency","aggregate_capacity"]
+
+
+Create alert rules in Grafana:
+
+Go to Alerting → Alert Rules.
+
+Example: Trigger an alert if volume_used_percent > 85%.
+
+Result
+
+InfluxDB stores all metrics in the netapp_metrics bucket.
+
+Grafana visualizes them via panels.
+
+Alerts and thresholds keep your ONTAP environment monitored.
+

@@ -1,0 +1,296 @@
+Nice 🎉 you’ve already got a Python Prometheus exporter for ONTAP sketched out!
+
+I’ll review your code and point out what’s good, what to fix, and how to extend it.
+
+✅ What’s Good
+
+Uses prometheus_client properly with Gauge metrics.
+
+Supports multiple clusters (CLUSTERS list).
+
+Pulls metrics for cluster stats, volumes, aggregates, SVMs, LUNs.
+
+Exposes Prometheus endpoint on port 9101.
+
+⚠️ Issues & Fixes
+
+Cluster stats endpoint (/cluster) doesn’t directly return metric
+ONTAP REST API /api/cluster usually gives metadata like name, version, etc.
+Performance metrics live under /api/cluster/metrics or /api/cluster/counter/tables/... depending on ONTAP version.
+
+👉 Fix: Change
+
+cluster_data = fetch_json(cluster, "/cluster")
+if "metric" in cluster_data:
+    cluster_latency_total.labels(cluster).set(cluster_data["metric"]["latency"]["total"])
+    cluster_iops_total.labels(cluster).set(cluster_data["metric"]["iops"]["total"])
+
+
+to something like:
+
+cluster_data = fetch_json(cluster, "/cluster/metrics")
+if "records" in cluster_data:
+    rec = cluster_data["records"][0]
+    cluster_latency_total.labels(cluster).set(rec.get("latency", 0))
+    cluster_iops_total.labels(cluster).set(rec.get("iops", 0))
+
+
+Volume IOPS
+Your code looks for:
+
+vol.get("statistics", {}).get("iops", {}).get("total", 0)
+
+
+But /api/storage/volumes by default doesn’t return stats.
+You need to query /api/storage/volumes?fields=statistics.
+
+👉 Fix in vol_data:
+
+vol_data = fetch_json(cluster, "/storage/volumes?fields=statistics")
+
+
+SVM endpoint
+You used /svm/svms, which is correct. ✅
+
+Timeouts & errors
+You already wrapped with try/except, but better to log Prometheus-friendly metrics for cluster failures:
+
+cluster_up = Gauge("netapp_cluster_up", "Cluster scrape success (1=up, 0=down)", ["cluster"])
+
+
+Then inside loop:
+
+try:
+    cluster_data = fetch_json(cluster, "/cluster/metrics")
+    cluster_up.labels(cluster).set(1)
+except:
+    cluster_up.labels(cluster).set(0)
+
+🔹 Improved Version (fixed + extended)
+from prometheus_client import start_http_server, Gauge
+import requests, time, urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+USERNAME = "admin"
+PASSWORD = "netapp123"
+CLUSTERS = ["10.10.10.100", "10.10.10.101", "10.10.10.102", "10.10.10.103", "10.10.10.104"]
+
+# Metrics
+cluster_up = Gauge("netapp_cluster_up", "Cluster scrape success (1=up, 0=down)", ["cluster"])
+cluster_latency_total = Gauge("netapp_cluster_latency_ms", "Cluster latency (ms)", ["cluster"])
+cluster_iops_total = Gauge("netapp_cluster_iops", "Cluster total IOPS", ["cluster"])
+volume_iops = Gauge("netapp_volume_iops", "Volume IOPS", ["cluster", "volume"])
+aggregate_count = Gauge("netapp_aggregate_count", "Total aggregates", ["cluster"])
+svm_count = Gauge("netapp_svm_count", "Total SVMs", ["cluster"])
+lun_count = Gauge("netapp_lun_count", "Total LUNs", ["cluster"])
+
+def fetch_json(cluster_ip, path):
+    url = f"https://{cluster_ip}/api{path}"
+    try:
+        r = requests.get(url, auth=(USERNAME, PASSWORD), verify=False, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            print(f"[WARN] {cluster_ip} {path} -> {r.status_code}")
+    except Exception as e:
+        print(f"[ERROR] Cluster {cluster_ip} path {path}: {e}")
+    return {}
+
+def collect_metrics():
+    for cluster in CLUSTERS:
+        try:
+            # Cluster stats
+            cluster_data = fetch_json(cluster, "/cluster/metrics")
+            if "records" in cluster_data and cluster_data["records"]:
+                rec = cluster_data["records"][0]
+                cluster_latency_total.labels(cluster).set(rec.get("latency", 0))
+                cluster_iops_total.labels(cluster).set(rec.get("iops", 0))
+            cluster_up.labels(cluster).set(1)
+
+            # Volumes
+            vol_data = fetch_json(cluster, "/storage/volumes?fields=statistics")
+            if "records" in vol_data:
+                for vol in vol_data["records"]:
+                    volume_iops.labels(cluster, vol["name"]).set(
+                        vol.get("statistics", {}).get("iops", {}).get("total", 0)
+                    )
+
+            # Aggregates
+            agg_data = fetch_json(cluster, "/storage/aggregates")
+            if "records" in agg_data:
+                aggregate_count.labels(cluster).set(len(agg_data["records"]))
+
+            # SVMs
+            svm_data = fetch_json(cluster, "/svm/svms")
+            if "records" in svm_data:
+                svm_count.labels(cluster).set(len(svm_data["records"]))
+
+            # LUNs
+            lun_data = fetch_json(cluster, "/storage/luns")
+            if "records" in lun_data:
+                lun_count.labels(cluster).set(len(lun_data["records"]))
+
+        except Exception as e:
+            print(f"[!] Error collecting {cluster}: {e}")
+            cluster_up.labels(cluster).set(0)
+
+if __name__ == "__main__":
+    start_http_server(9101)
+    print("🚀 NetApp Exporter running on port 9101")
+    while True:
+        collect_metrics()
+        time.sleep(30)
+
+
+👉 This version:
+
+Fixes wrong endpoints for metrics.
+
+Ensures volume stats are collected.
+
+Adds netapp_cluster_up to check scrape health.
+
+Do you want me to extend this further so it also tracks node CPU/memory usage from /api/cluster/nodes?fields=statistics? That’s often useful in Grafana dashboards.
+
+You said:
+
+Do you want me to extend this further so it also **tracks node CPU/memory usage** from
+
+yes
+ChatGPT said:
+
+Perfect 👍 let’s extend your exporter to also scrape node-level CPU and memory stats.
+
+ONTAP REST API gives node stats under:
+
+/api/cluster/nodes?fields=statistics
+
+
+Each node’s JSON will contain something like:
+
+{
+  "name": "node1",
+  "statistics": {
+    "cpu_raw": {
+      "busy": 12
+    },
+    "memory": {
+      "used": 4294967296,
+      "total": 8589934592
+    }
+  }
+}
+
+🔹 Updated Exporter with Node CPU + Memory
+from prometheus_client import start_http_server, Gauge
+import requests, time, urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+USERNAME = "admin"
+PASSWORD = "netapp123"
+CLUSTERS = ["10.10.10.100", "10.10.10.101", "10.10.10.102", "10.10.10.103", "10.10.10.104"]
+
+# ===== Prometheus Gauges =====
+cluster_up = Gauge("netapp_cluster_up", "Cluster scrape success (1=up, 0=down)", ["cluster"])
+cluster_latency_total = Gauge("netapp_cluster_latency_ms", "Cluster latency (ms)", ["cluster"])
+cluster_iops_total = Gauge("netapp_cluster_iops", "Cluster total IOPS", ["cluster"])
+
+volume_iops = Gauge("netapp_volume_iops", "Volume IOPS", ["cluster", "volume"])
+aggregate_count = Gauge("netapp_aggregate_count", "Total aggregates", ["cluster"])
+svm_count = Gauge("netapp_svm_count", "Total SVMs", ["cluster"])
+lun_count = Gauge("netapp_lun_count", "Total LUNs", ["cluster"])
+
+node_cpu_busy = Gauge("netapp_node_cpu_percent", "Node CPU busy percent", ["cluster", "node"])
+node_memory_used = Gauge("netapp_node_memory_used_bytes", "Node memory used (bytes)", ["cluster", "node"])
+node_memory_total = Gauge("netapp_node_memory_total_bytes", "Node total memory (bytes)", ["cluster", "node"])
+
+# ===== Helper =====
+def fetch_json(cluster_ip, path):
+    url = f"https://{cluster_ip}/api{path}"
+    try:
+        r = requests.get(url, auth=(USERNAME, PASSWORD), verify=False, timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            print(f"[WARN] {cluster_ip} {path} -> {r.status_code}")
+    except Exception as e:
+        print(f"[ERROR] Cluster {cluster_ip} path {path}: {e}")
+    return {}
+
+# ===== Collect metrics =====
+def collect_metrics():
+    for cluster in CLUSTERS:
+        try:
+            # Cluster stats
+            cluster_data = fetch_json(cluster, "/cluster/metrics")
+            if "records" in cluster_data and cluster_data["records"]:
+                rec = cluster_data["records"][0]
+                cluster_latency_total.labels(cluster).set(rec.get("latency", 0))
+                cluster_iops_total.labels(cluster).set(rec.get("iops", 0))
+            cluster_up.labels(cluster).set(1)
+
+            # Volumes (with statistics)
+            vol_data = fetch_json(cluster, "/storage/volumes?fields=statistics")
+            if "records" in vol_data:
+                for vol in vol_data["records"]:
+                    volume_iops.labels(cluster, vol["name"]).set(
+                        vol.get("statistics", {}).get("iops", {}).get("total", 0)
+                    )
+
+            # Aggregates
+            agg_data = fetch_json(cluster, "/storage/aggregates")
+            if "records" in agg_data:
+                aggregate_count.labels(cluster).set(len(agg_data["records"]))
+
+            # SVMs
+            svm_data = fetch_json(cluster, "/svm/svms")
+            if "records" in svm_data:
+                svm_count.labels(cluster).set(len(svm_data["records"]))
+
+            # LUNs
+            lun_data = fetch_json(cluster, "/storage/luns")
+            if "records" in lun_data:
+                lun_count.labels(cluster).set(len(lun_data["records"]))
+
+            # Nodes (CPU & Memory)
+            node_data = fetch_json(cluster, "/cluster/nodes?fields=statistics")
+            if "records" in node_data:
+                for node in node_data["records"]:
+                    node_name = node["name"]
+                    stats = node.get("statistics", {})
+                    # CPU
+                    cpu_busy = stats.get("cpu_raw", {}).get("busy", 0)
+                    node_cpu_busy.labels(cluster, node_name).set(cpu_busy)
+                    # Memory
+                    mem = stats.get("memory", {})
+                    node_memory_used.labels(cluster, node_name).set(mem.get("used", 0))
+                    node_memory_total.labels(cluster, node_name).set(mem.get("total", 0))
+
+        except Exception as e:
+            print(f"[!] Error collecting {cluster}: {e}")
+            cluster_up.labels(cluster).set(0)
+
+# ===== Main =====
+if __name__ == "__main__":
+    start_http_server(9101)
+    print("🚀 NetApp Exporter running on port 9101")
+    while True:
+        collect_metrics()
+        time.sleep(30)
+
+🔹 New Metrics in Prometheus / Grafana
+
+netapp_node_cpu_percent{cluster="10.10.10.100",node="node1"} → CPU busy percentage
+
+netapp_node_memory_used_bytes
+
+netapp_node_memory_total_bytes
+
+Grafana can compute Memory % as:
+
+(netapp_node_memory_used_bytes / netapp_node_memory_total_bytes) * 100
+
+
+Would you like me to also add per-LUN IOPS and latency (from /api/storage/luns?fields=statistics) so you can see workload performance per LUN in Grafana?
